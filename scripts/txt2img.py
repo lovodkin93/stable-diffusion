@@ -1,4 +1,5 @@
 import argparse, os, sys, glob
+from random import randint
 import cv2
 import torch
 import numpy as np
@@ -14,6 +15,7 @@ from pytorch_lightning import seed_everything
 from torch import autocast
 from contextlib import contextmanager, nullcontext
 import json
+import random
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -232,7 +234,7 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=None,
         help="the seed (for reproducible sampling)",
     )
     parser.add_argument(
@@ -250,7 +252,10 @@ def main():
         opt.ckpt = "models/ldm/text2img-large/model.ckpt"
         opt.outdir = "outputs/txt2img-samples-laion400m"
 
-    seed_everything(opt.seed)
+    if opt.seed:
+        seed_everything(opt.seed)
+    else:
+        seed_everything(random.randint(0, 10e6))
 
     config = OmegaConf.load(f"{opt.config}")
     model = load_model_from_config(config, f"{opt.ckpt}")
@@ -274,7 +279,7 @@ def main():
     batch_size = opt.n_samples
     n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
     
-    if opt.prompt_list:
+    if opt.prompt_list: # ROYI: added
         prompt_list = json.loads(opt.prompt_list)
         proportions = json.loads(opt.proportions) if opt.proportions else [1]*len(prompt_list)
         if len(prompt_list) != len(proportions):
@@ -313,8 +318,8 @@ def main():
                             uc = model.get_learned_conditioning(batch_size * [""])
                         if opt.prompt_list:
                             (prompt_list, proportions) = prompts
-                            c_list = [model.get_learned_conditioning(pr) for pr in prompt_list]
-                            c = sum([c_elem*proportions[i] for i,c_elem in enumerate(c_list)])
+                            c_list = [model.get_learned_conditioning(pr) for pr in prompt_list] # ROYI: get_learned_conditioning == encoding
+                            c = sum([c_elem*proportions[i] for i,c_elem in enumerate(c_list)]) # ROYI: here is where the magic happens
                         else:
                             if isinstance(prompts, tuple):
                                 prompts = list(prompts)
@@ -330,7 +335,7 @@ def main():
                                                         eta=opt.ddim_eta,
                                                         x_T=start_code)
 
-                        x_samples_ddim = model.decode_first_stage(samples_ddim)
+                        x_samples_ddim = model.decode_first_stage(samples_ddim) # ROYI: decoding
                         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
                         x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
 
