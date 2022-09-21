@@ -16,6 +16,7 @@ from torch import autocast
 from contextlib import contextmanager, nullcontext
 import json
 import random
+import pdb
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -220,6 +221,16 @@ def main():
         help="if specified, load prompts from this file",
     )
     parser.add_argument(
+        "--from-json-prompt-list",
+        type=str,
+        help="if specified, load prompts from this file",
+    )
+    parser.add_argument(
+        "--from-csv-prompt-list",
+        type=str,
+        help="if specified, load prompts from this csv file",
+    )
+    parser.add_argument(
         "--config",
         type=str,
         default="configs/stable-diffusion/v1-inference.yaml",
@@ -279,7 +290,14 @@ def main():
     batch_size = opt.n_samples
     n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
     
-    if opt.prompt_list: # ROYI: added
+    if opt.from_json_prompt_list: # ROYI: added
+        with open(opt.from_json_prompt_list, 'r') as f:
+            data_dict = [json.loads(line) for line in f]
+        data = [(elem["prompts"], elem["proportions"]) for elem in data_dict]
+        data = [[batch_size * [elem]] for elem in data]
+        data = [elem[:][0] for elem in data]
+
+    elif opt.prompt_list: # ROYI: added
         prompt_list = json.loads(opt.prompt_list)
         proportions = json.loads(opt.proportions) if opt.proportions else [1]*len(prompt_list)
         if len(prompt_list) != len(proportions):
@@ -316,15 +334,21 @@ def main():
                         uc = None
                         if opt.scale != 1.0:
                             uc = model.get_learned_conditioning(batch_size * [""])
-                        if opt.prompt_list:
-                            (prompt_list, proportions) = prompts
-                            c_list = [model.get_learned_conditioning(pr) for pr in prompt_list] # ROYI: get_learned_conditioning == encoding
-                            c = sum([c_elem*proportions[i] for i,c_elem in enumerate(c_list)]) # ROYI: here is where the magic happens
+                        if opt.prompt_list or opt.from_json_prompt_list:
+                            final_c_list = [] 
+                            for prompt_inst in prompts:
+                                (prompt_list, proportions) = prompt_inst
+                                c_list = [model.get_learned_conditioning(pr) for pr in prompt_list] # ROYI: get_learned_conditioning == encoding
+                                if not proportions:
+                                    proportions = [1]*len(c_list)
+                                final_c_list = final_c_list + [sum([c_elem*proportions[i] for i,c_elem in enumerate(c_list)])] # ROYI: here is where the magic happens
+                            c = torch.cat(final_c_list, dim=0)
                         else:
                             if isinstance(prompts, tuple):
                                 prompts = list(prompts)
                             c = model.get_learned_conditioning(prompts)
                         shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
+                        # pdb.set_trace() # AVIVSL: remove
                         samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
                                                         conditioning=c,
                                                         batch_size=opt.n_samples,
