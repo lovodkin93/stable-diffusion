@@ -1,0 +1,17 @@
+to run - first follow the README.md instructions to create the ldm virtual environment.
+Then, to run the experiments, run:
+```
+sh start_tmux.sh 
+```
+With either one of the following parameter, according to the relevant experiment:
+`--from-csv-prompt-list /path/to/csv_file` (csv with at least "prompt" column with a single prompt per row)
+--from-json-prompt-list /path/to/json_file` (json file where each row consists of a list of prompts anf a list of proportions of superposition of prompts' latent vectors)
+`--save-encoder-output` (if want to save the encoder output - must come with the --from-csv-prompt-list parameter. Will save the vectors into the csv file past in the --from-csv-prompt-list parameter)
+`--only-encode` (if want to skip the decoding to save time - for example if saving the encoder output)
+`--ddim-steps <num_decoding>` (number of decoding steps - default is 200)
+`--ckpt /path/to/checkpoint` (path to checkpoint of the model - default is /home/nlp/sloboda1/collaborations/royi/stable-diffusion/checkpoint/sd-v1-4.ckpt - shouldn't be changed)
+`--n-samples <num_samples>` (number of samples per batch, default=1. If you pass the --save-encoder-output parameter - then --n-samples must remain 1) 
+`--n-iter <num_iter>` (number of time to sample each prompt, default=1. If you pass the --save-encoder-output parameter - then --n-samples must remain 1) 
+`--scale <scale_size>` (guidance scale - default is 7.5)
+`--subdir-name <subdir_name>` (name of subdir in the output dir where the images will be saved - default is txt2img-samples).
+`--cuda-visible-devices` <cuda_number> (number of the gpu to run on - default is 0. Relevant when the 0 machine is already taken).
