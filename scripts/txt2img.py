@@ -15,8 +15,10 @@ from pytorch_lightning import seed_everything
 from torch import autocast
 from contextlib import contextmanager, nullcontext
 import json
+import pandas as pd
 import random
 import pdb
+
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -223,12 +225,23 @@ def main():
     parser.add_argument(
         "--from-json-prompt-list",
         type=str,
-        help="if specified, load prompts from this file",
+        help="if specified, load prompts + proportions from this json file",
     )
     parser.add_argument(
         "--from-csv-prompt-list",
         type=str,
+        default=None,
         help="if specified, load prompts from this csv file",
+    )
+    parser.add_argument(
+        "--save-encoder-output",
+        action='store_true',
+        help="if enabled, saves the encoder output (latent representation) to the same csv file (must come with a csv file) under the column \"latent_vector\"",
+    )
+    parser.add_argument(
+        "--only-encode",
+        action='store_true',
+        help="if enabled, will only encode prompt, without decoding the latent vector (should be combined with --save-encoder-output to save the decoding time)",
     )
     parser.add_argument(
         "--config",
@@ -296,6 +309,10 @@ def main():
         data = [(elem["prompts"], elem["proportions"]) for elem in data_dict]
         data = [[batch_size * [elem]] for elem in data]
         data = [elem[:][0] for elem in data]
+    if opt.from_csv_prompt_list: # ROYI: added
+        print(f"reading prompts from {opt.from_csv_prompt_list}")
+        prompts_df = pd.read_csv(opt.from_csv_prompt_list)
+        data = list(chunk(prompts_df["prompt"], batch_size))
 
     elif opt.prompt_list: # ROYI: added
         prompt_list = json.loads(opt.prompt_list)
@@ -329,6 +346,7 @@ def main():
             with model.ema_scope():
                 tic = time.time()
                 all_samples = list()
+                all_latent_vectors = list()
                 for n in trange(opt.n_iter, desc="Sampling"):
                     for prompts in tqdm(data, desc="data"):
                         uc = None
@@ -347,6 +365,18 @@ def main():
                             if isinstance(prompts, tuple):
                                 prompts = list(prompts)
                             c = model.get_learned_conditioning(prompts)
+                        if opt.save_encoder_output: ## save the encodings
+                            if not opt.from_csv_prompt_list:
+                                raise ValueError(f"--save-encoder-output must be accompanied with the --from-csv-prompt-list parameter")
+                            if not opt.n_iter == 1 or not opt.n_samples==1:
+                                raise ValueError(f"--save-encoder-output must be accompanied with the --n-iter=1 and --n-samples=1 parameters")
+                            c_np = c.cpu().detach().numpy()
+                            curr_latent_vector_list = [c_np[ind,:,:] for ind in range(c_np.shape[0])]
+                            all_latent_vectors = all_latent_vectors + curr_latent_vector_list
+
+
+                        if opt.only_encode: ## skip the decoding step
+                            continue
                         shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
                         # pdb.set_trace() # AVIVSL: remove
                         samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
@@ -377,8 +407,12 @@ def main():
 
                         if not opt.skip_grid:
                             all_samples.append(x_checked_image_torch)
+                
+                if opt.save_encoder_output:
+                    prompts_df["latent_vector"] = [latent_vector.tolist() for latent_vector in all_latent_vectors]
 
-                if not opt.skip_grid:
+
+                if not opt.skip_grid and not opt.only_encode:
                     # additionally, save as grid
                     grid = torch.stack(all_samples, 0)
                     grid = rearrange(grid, 'n b c h w -> (n b) c h w')
