@@ -410,6 +410,11 @@ def main():
                 
                 if opt.save_encoder_output:
                     prompts_df["latent_vector"] = [latent_vector.tolist() for latent_vector in all_latent_vectors]
+                    prompts_df.to_csv(os.path.join(outpath, "stable_diffusion_prompts_updated.csv"))
+                    tensor_map_is_realistic = {prompts_df["prompt"][i]:torch.from_numpy(all_latent_vectors[i]) for i,value in enumerate(all_latent_vectors) if prompts_df["is_realistic"][i]}
+                    tensor_map_not_realistic = {prompts_df["prompt"][i]:torch.from_numpy(all_latent_vectors[i]) for i,value in enumerate(all_latent_vectors) if not prompts_df["is_realistic"][i]}
+                    torch.save(tensor_map_is_realistic, os.path.join(outpath, "tensor_map_is_realistic.pt"))
+                    torch.save(tensor_map_not_realistic, os.path.join(outpath, "tensor_map_not_realistic.pt"))
 
 
                 if not opt.skip_grid and not opt.only_encode:
