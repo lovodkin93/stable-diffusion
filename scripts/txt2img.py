@@ -18,6 +18,11 @@ import json
 import pandas as pd
 import random
 import pdb
+import sys
+import pathlib
+sys.path.append(os.path.join(pathlib.Path(__file__).parent.resolve(), ".."))
+from project_experiments.classify import classify
+from nullspace_projection.src import debias
 
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
@@ -28,6 +33,13 @@ from ldm.models.diffusion.plms import PLMSSampler
 
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from transformers import AutoFeatureExtractor
+
+
+from sklearn.linear_model import LogisticRegression, Perceptron
+from sklearn.svm import LinearSVC, SVC
+from sklearn.utils import shuffle
+import sklearn
+
 
 # load safety model
 safety_model_id = "CompVis/stable-diffusion-safety-checker"
@@ -244,6 +256,16 @@ def main():
         help="if enabled, will only encode prompt, without decoding the latent vector (should be combined with --save-encoder-output to save the decoding time)",
     )
     parser.add_argument(
+        "--project-on-null-space",
+        action='store_true',
+        help="if enabled, will first calculate all the latent vectors, and then will calculate the projection to the null space and will project the vectors to it",
+    )
+    parser.add_argument(
+        "--inlp-projection",
+        action='store_true',
+        help="if enabled, will perform the INLP projection",
+    )
+    parser.add_argument(
         "--config",
         type=str,
         default="configs/stable-diffusion/v1-inference.yaml",
@@ -331,6 +353,8 @@ def main():
             data = f.read().splitlines()
             data = list(chunk(data, batch_size))
 
+    if opt.project_on_null_space:
+        outpath = os.path.join(outpath, "projected_on_nullspace")
     sample_path = os.path.join(outpath, "samples")
     os.makedirs(sample_path, exist_ok=True)
     base_count = len(os.listdir(sample_path))
@@ -365,20 +389,17 @@ def main():
                             if isinstance(prompts, tuple):
                                 prompts = list(prompts)
                             c = model.get_learned_conditioning(prompts)
-                        if opt.save_encoder_output: ## save the encodings
-                            if not opt.from_csv_prompt_list:
-                                raise ValueError(f"--save-encoder-output must be accompanied with the --from-csv-prompt-list parameter")
-                            if not opt.n_iter == 1 or not opt.n_samples==1:
-                                raise ValueError(f"--save-encoder-output must be accompanied with the --n-iter=1 and --n-samples=1 parameters")
-                            c_np = c.cpu().detach().numpy()
-                            curr_latent_vector_list = [c_np[ind,:,:] for ind in range(c_np.shape[0])]
-                            all_latent_vectors = all_latent_vectors + curr_latent_vector_list
+                        # if opt.save_encoder_output or opt.project_on_null_space: ## save the encodings
+                        #     if not opt.from_csv_prompt_list:
+                        #         raise ValueError(f"--save-encoder-output must be accompanied with the --from-csv-prompt-list parameter")
+                        #     if not opt.n_iter == 1 or not opt.n_samples==1:
+                        #         raise ValueError(f"--save-encoder-output must be accompanied with the --n-iter=1 and --n-samples=1 parameters")
+                        #     c_np = c.cpu().detach().numpy()
+                        #     curr_latent_vector_list = [c_np[ind,:,:] for ind in range(c_np.shape[0])]
+                        #     all_latent_vectors = all_latent_vectors + curr_latent_vector_list
 
 
-                        if opt.only_encode: ## skip the decoding step
-                            continue
                         shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
-                        # pdb.set_trace() # AVIVSL: remove
                         samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
                                                         conditioning=c,
                                                         batch_size=opt.n_samples,
@@ -388,6 +409,22 @@ def main():
                                                         unconditional_conditioning=uc,
                                                         eta=opt.ddim_eta,
                                                         x_T=start_code)
+                        
+                                                # pdb.set_trace() # AVIVSL: remove
+                        
+                        if opt.save_encoder_output or opt.project_on_null_space: ## save the encodings
+                            if not opt.from_csv_prompt_list:
+                                raise ValueError(f"--save-encoder-output must be accompanied with the --from-csv-prompt-list parameter")
+                            if not opt.n_iter == 1 or not opt.n_samples==1:
+                                raise ValueError(f"--save-encoder-output must be accompanied with the --n-iter=1 and --n-samples=1 parameters")
+                            samples_ddim_np = samples_ddim.cpu().detach().numpy()
+                            curr_latent_vector_list = [samples_ddim_np[ind,:,:,:] for ind in range(samples_ddim_np.shape[0])]
+                            all_latent_vectors = all_latent_vectors + curr_latent_vector_list
+                        
+
+                        if opt.only_encode or opt.project_on_null_space or opt.inlp_projection: ## skip the decoding step
+                            continue
+
 
                         x_samples_ddim = model.decode_first_stage(samples_ddim) # ROYI: decoding
                         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
@@ -405,8 +442,83 @@ def main():
                                 img.save(os.path.join(sample_path, f"{base_count:05}.png"))
                                 base_count += 1
 
-                        if not opt.skip_grid:
+                        if not opt.skip_grid and not opt.project_on_null_space:
                             all_samples.append(x_checked_image_torch)
+
+                
+                if opt.project_on_null_space or opt.inlp_projection:
+                    with torch.no_grad():
+                        with precision_scope("cuda"):
+                            with model.ema_scope():
+                                if opt.project_on_null_space:
+                                    tensors_is_realistic = [torch.from_numpy(all_latent_vectors[i]) for i,value in enumerate(all_latent_vectors) if prompts_df["is_realistic"][i]]
+                                    tensors_not_realistic = [torch.from_numpy(all_latent_vectors[i]) for i,value in enumerate(all_latent_vectors) if not prompts_df["is_realistic"][i]]
+                                    realistic_t = torch.stack(tensors_is_realistic, dim=0)
+                                    not_realistic_t = torch.stack(tensors_not_realistic, dim=0)
+                                    realistic_mean = torch.mean(realistic_t, 0)
+                                    not_realistic_mean = torch.mean(not_realistic_t, 0)
+                                    v = realistic_mean - not_realistic_mean
+                                    v = v.flatten()
+                                    v_norm = torch.nn.functional.normalize(v, p=2.0, dim = 0)
+                                    proj_mtx = torch.eye(v_norm.shape[0]) - np.outer(v_norm,v_norm)
+                                else:
+                                    emb_realistic = np.stack([all_latent_vectors[i].flatten() for i,value in enumerate(all_latent_vectors) if prompts_df["is_realistic"][i]], axis=0)
+                                    emb_not_realistic = np.stack([all_latent_vectors[i].flatten() for i,value in enumerate(all_latent_vectors) if not prompts_df["is_realistic"][i]], axis=0)
+                                    X = np.concatenate((emb_not_realistic , emb_not_realistic), axis = 0)
+                                    y_realistic = np.ones(emb_realistic.shape[0], dtype = int)
+                                    y_not_realistic = np.zeros(emb_not_realistic.shape[0], dtype = int)
+                                    y = np.concatenate((y_realistic, y_not_realistic))
+                                    X_train, X_dev, Y_train, Y_dev = sklearn.model_selection.train_test_split(X, y, test_size = 0.1, random_state = 0)
+
+
+
+
+                                    realistic_clf = LogisticRegression
+                                    # realistic_clf = LinearSVC
+                                    params_LR = {'C': 0.1, 'solver':'saga'}
+                                    params_svc = {'fit_intercept': False, 'class_weight': None, "dual": False, 'random_state': 0}
+                                    params = params_LR
+                                    n = 35
+                                    min_acc = 0
+                                    is_autoregressive = True
+                                    dropout_rate = 0
+
+                                    P, rowspace_projs, Ws = debias.get_debiasing_projection(realistic_clf, params, n, int(np.prod(shape)), is_autoregressive, min_acc,
+                                                                        X_train, Y_train, X_dev, Y_dev,
+                                                                        Y_train_main=None, Y_dev_main=None, 
+                                                                        by_class = False, dropout_rate = dropout_rate)
+
+                                    proj_mtx = torch.from_numpy(P).float()
+
+
+                                for latent_vector in all_latent_vectors:
+                                    shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
+                                    latent_vector_projected = torch.Tensor(latent_vector.flatten())
+                                    latent_vector_projected = torch.matmul(proj_mtx,latent_vector_projected)
+                                    samples_ddim_projected = latent_vector_projected.reshape(samples_ddim.shape).to("cuda")
+
+
+                                    x_samples_ddim = model.decode_first_stage(samples_ddim_projected) # ROYI: decoding
+                                    x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+                                    x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
+
+                                    x_checked_image, has_nsfw_concept = check_safety(x_samples_ddim)
+
+                                    x_checked_image_torch = torch.from_numpy(x_checked_image).permute(0, 3, 1, 2)
+
+                                    if not opt.skip_save:
+                                        for x_sample in x_checked_image_torch:
+                                            x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+                                            img = Image.fromarray(x_sample.astype(np.uint8))
+                                            img = put_watermark(img, wm_encoder)
+                                            img.save(os.path.join(sample_path, f"{base_count:05}.png"))
+                                            base_count += 1
+
+                                    if not opt.skip_grid:
+                                        all_samples.append(x_checked_image_torch)
+
+
+
                 
                 if opt.save_encoder_output:
                     prompts_df["latent_vector"] = [latent_vector.tolist() for latent_vector in all_latent_vectors]
